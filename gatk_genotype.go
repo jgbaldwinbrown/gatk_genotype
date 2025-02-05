@@ -20,6 +20,114 @@ type Flags struct {
 	Threads int
 	MemoryGb int
 	Nproc int
+	Trim bool
+}
+
+const adaptersFa = `>PrefixNX/1
+AGATGTGTATAAGAGACAG
+>PrefixNX/2
+AGATGTGTATAAGAGACAG
+>Trans1
+TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG
+>Trans1_rc
+CTGTCTCTTATACACATCTGACGCTGCCGACGA
+>Trans2
+GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG
+>Trans2_rc
+CTGTCTCTTATACACATCTCCGAGCCCACGAGAC>PrefixPE/1
+AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCT
+>PrefixPE/2
+CAAGCAGAAGACGGCATACGAGATCGGTCTCGGCATTCCTGCTGAACCGCTCTTCCGATCT
+>PCR_Primer1
+AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCT
+>PCR_Primer1_rc
+AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTAGATCTCGGTGGTCGCCGTATCATT
+>PCR_Primer2
+CAAGCAGAAGACGGCATACGAGATCGGTCTCGGCATTCCTGCTGAACCGCTCTTCCGATCT
+>PCR_Primer2_rc
+AGATCGGAAGAGCGGTTCAGCAGGAATGCCGAGACCGATCTCGTATGCCGTCTTCTGCTTG
+>FlowCell1
+TTTTTTTTTTAATGATACGGCGACCACCGAGATCTACAC
+>FlowCell2
+TTTTTTTTTTCAAGCAGAAGACGGCATACGA>TruSeq2_SE
+AGATCGGAAGAGCTCGTATGCCGTCTTCTGCTTG
+>TruSeq2_PE_f
+AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT
+>TruSeq2_PE_r
+AGATCGGAAGAGCGGTTCAGCAGGAATGCCGAG>PrefixPE/1
+TACACTCTTTCCCTACACGACGCTCTTCCGATCT
+>PrefixPE/2
+GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT
+>PE1
+TACACTCTTTCCCTACACGACGCTCTTCCGATCT
+>PE1_rc
+AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTA
+>PE2
+GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT
+>PE2_rc
+AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC>PrefixPE/1
+TACACTCTTTCCCTACACGACGCTCTTCCGATCT
+>PrefixPE/2
+GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT>TruSeq3_IndexedAdapter
+AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC
+>TruSeq3_UniversalAdapter
+AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTA`
+
+func CreateTempAdapters() (string, error) {
+	fp, e := os.CreateTemp("", "adapters*.fa")
+	if e != nil {
+		return "", e
+	}
+	path := fp.Name()
+	if _, e := fmt.Fprintf(fp, "%v\n", adaptersFa); e != nil {
+		os.Remove(path)
+		return "", e
+	}
+	if e := fp.Close(); e != nil {
+		os.Remove(path)
+		return "", e
+	}
+	return path, nil
+}
+
+func TrimCore(forward, reverse, forwardTrimmed, forwardTrimmedUnpaired, reverseTrimmed, reverseTrimmedUnpaired string, threads int) (err error) {
+	adapterPath, e := CreateTempAdapters()
+	if e != nil {
+		return e
+	}
+	defer func() {
+		e := os.Remove(adapterPath)
+		if err == nil {
+			err = e
+		}
+	}()
+	clip := fmt.Sprintf("ILLUMINACLIP:%v:2:30:10", adapterPath)
+
+	cmd := exec.Command(
+		"java", "-jar", "/usr/share/java/trimmomatic-0.39.jar",
+		"PE",
+		"-threads", fmt.Sprint(threads),
+		"-phred33",
+		forward, reverse,
+		forwardTrimmed, forwardTrimmedUnpaired,
+		reverseTrimmed, reverseTrimmedUnpaired,
+		clip,
+		"LEADING:20",
+		"TRAILING:20",
+		"MINLEN:30",
+	)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
+}
+
+func Trim(forward, reverse, outpre string, threads int) error {
+	return TrimCore(
+		forward, reverse,
+		outpre + "_forward_trimmed.fq.gz", outpre + "_forward_trimmed_unpaired.fq.gz",
+		outpre + "_reverse_trimmed.fq.gz", outpre + "_reverse_trimmed_unpaired.fq.gz",
+		threads,
+	)
 }
 
 func BwaIndex(ref string) error {
@@ -223,13 +331,23 @@ func FullFQFMimic(f Flags) error {
 	group.SetLimit(f.Nproc)
 	var gvcfpaths []string
 	for _, set := range sets {
+		set := set
 		bampath := f.Outpre + "_" + set.Name + ".bam"
 		bampathrg := f.Outpre + "_" + set.Name + "_rg.bam"
 		gvcfpath := f.Outpre + "_" + set.Name + ".g.vcf.gz"
 		gvcfpaths = append(gvcfpaths, gvcfpath)
+		fwd := set.ForwardPath
+		rev := set.ReversePath
 
 		group.Go(func() error {
-			if e := BwaMem(f.RefPath, set.ForwardPath, set.ReversePath, bampath, f.Threads); e != nil {
+			if f.Trim {
+				fwd = f.Outpre + "_" + set.Name + "_forward_trimmed.fq.gz"
+				rev = f.Outpre + "_" + set.Name + "_reverse_trimmed.fq.gz"
+				if e := Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads); e != nil {
+					return e
+				}
+			}
+			if e := BwaMem(f.RefPath, fwd, rev, bampath, f.Threads); e != nil {
 				return e
 			}
 			if e := AddRG(bampath, bampathrg, set.Name); e != nil {
@@ -262,6 +380,7 @@ func main() {
 	flag.IntVar(&f.Threads, "t", 1, "Threads to use")
 	flag.IntVar(&f.MemoryGb, "m", 8, "Memory to use (integer, gigabytes)")
 	flag.IntVar(&f.Nproc, "n", 1, "Number of simultaneous runs of BWA / picard to run")
+	flag.BoolVar(&f.Trim, "T", false, "Also trim input files with trimmomatic")
 	flag.Parse()
 	if (f.RefPath == "" || f.SeqPairsPath == "") {
 		log.Fatal("missing -r or -s")

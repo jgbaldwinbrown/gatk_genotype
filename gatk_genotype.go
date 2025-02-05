@@ -9,6 +9,8 @@ import (
 	"flag"
 	"log"
 	"encoding/csv"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type Flags struct {
@@ -17,6 +19,7 @@ type Flags struct {
 	Outpre string
 	Threads int
 	MemoryGb int
+	Nproc int
 }
 
 func BwaIndex(ref string) error {
@@ -216,26 +219,33 @@ func FullFQFMimic(f Flags) error {
 		return e
 	}
 
+	var group errgroup.Group
+	group.SetLimit(f.Nproc)
 	var gvcfpaths []string
 	for _, set := range sets {
 		bampath := f.Outpre + "_" + set.Name + ".bam"
-		if e := BwaMem(f.RefPath, set.ForwardPath, set.ReversePath, bampath, f.Threads); e != nil {
-			return e
-		}
-
 		bampathrg := f.Outpre + "_" + set.Name + "_rg.bam"
-		if e := AddRG(bampath, bampathrg, set.Name); e != nil {
-			return e
-		}
-		if e := SamIndex(bampathrg); e != nil {
-			return e
-		}
-
 		gvcfpath := f.Outpre + "_" + set.Name + ".g.vcf.gz"
-		if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb); e != nil {
-			return e
-		}
 		gvcfpaths = append(gvcfpaths, gvcfpath)
+
+		group.Go(func() error {
+			if e := BwaMem(f.RefPath, set.ForwardPath, set.ReversePath, bampath, f.Threads); e != nil {
+				return e
+			}
+			if e := AddRG(bampath, bampathrg, set.Name); e != nil {
+				return e
+			}
+			if e := SamIndex(bampathrg); e != nil {
+				return e
+			}
+			if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb); e != nil {
+				return e
+			}
+			return nil
+		})
+	}
+	if e := group.Wait(); e != nil {
+		return e
 	}
 
 	goutpath := f.Outpre + ".g.vcf.gz"
@@ -251,6 +261,7 @@ func main() {
 	flag.StringVar(&f.Outpre, "o", "out", "Output prefix")
 	flag.IntVar(&f.Threads, "t", 1, "Threads to use")
 	flag.IntVar(&f.MemoryGb, "m", 8, "Memory to use (integer, gigabytes)")
+	flag.IntVar(&f.Nproc, "n", 1, "Number of simultaneous runs of BWA / picard to run")
 	flag.Parse()
 	if (f.RefPath == "" || f.SeqPairsPath == "") {
 		log.Fatal("missing -r or -s")

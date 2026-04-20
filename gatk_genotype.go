@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 )
 
 type Flags struct {
+	NoAln bool
 	RefPath string
 	SeqPairsPath string
 	Outpre string
@@ -21,6 +23,8 @@ type Flags struct {
 	MemoryGb int
 	Nproc int
 	Trim bool
+	BamPathsPath string
+	DeleteTempFiles bool
 }
 
 const adaptersFa = `>PrefixNX/1
@@ -130,6 +134,29 @@ func Trim(forward, reverse, outpre string, threads int) error {
 	)
 }
 
+func FileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func DeleteTrim(f Flags, s ReadSet) error {
+	outpre := f.Outpre + "_" + s.Name
+	trimouts := []string {
+		outpre + "_forward_trimmed.fq.gz",
+		outpre + "_forward_trimmed_unpaired.fq.gz",
+		outpre + "_reverse_trimmed.fq.gz",
+		outpre + "_reverse_trimmed_unpaired.fq.gz",
+	}
+	for _, trimout := range trimouts {
+		if FileExists(trimout) {
+			if e := os.Remove(trimout); e != nil {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
 func BwaIndex(ref string) error {
 	cmd := exec.Command("bwa", "index", ref)
 	cmd.Stdout = os.Stdout
@@ -199,12 +226,32 @@ func BwaMem(ref, forward, reverse, out string, threads int) (err error) {
 	return nil
 }
 
+func DeleteBam(f Flags, s ReadSet) error {
+	bampath := f.Outpre + "_" + s.Name + ".bam"
+	if FileExists(bampath) {
+		if e := os.Remove(bampath); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
 func AddRG(inpath, outpath, name string) error {
 	rgchange := fmt.Sprintf("@RG\tID:%v\tSM:%v", name, name)
 	cmd := exec.Command("samtools", "addreplacerg", "-r", rgchange, inpath, "-o", outpath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func DeleteRGBam(f Flags, s ReadSet) error {
+	bampathrg := f.Outpre + "_" + s.Name + "_rg.bam"
+	if FileExists(bampathrg) {
+		if e := os.Remove(bampathrg); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 func Faidx(fapath string) error {
@@ -248,6 +295,25 @@ func HaplotypeCall(fapath, bampath, gvcfpath, name string, memoryGb int) error {
 	return nil
 }
 
+func DeleteGvcfs(f Flags, s ReadSet) error {
+	gvcfpath := f.Outpre + "_" + s.Name + ".g.vcf.gz"
+	if FileExists(gvcfpath) {
+		if e := os.Remove(gvcfpath); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func DeletePath(path string) error {
+	if FileExists(path) {
+		if e := os.Remove(path); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
 func CombineGvcf(fapath, gvcfoutpath, vcfoutpath string, memoryGb int, gvcfpaths ...string) error {
 	memstr := fmt.Sprintf("-Xmx%vg", memoryGb)
 	combsl := []string{
@@ -284,6 +350,7 @@ type ReadSet struct {
 	Name string
 	ForwardPath string
 	ReversePath string
+	BamPath string
 }
 
 func ParseReadSets(path string) (pairs []ReadSet, err error) {
@@ -312,7 +379,33 @@ func ParseReadSets(path string) (pairs []ReadSet, err error) {
 	return pairs, nil
 }
 
-func FullFQFMimic(f Flags) error {
+func ParseBamSets(path string) (pairs []ReadSet, err error) {
+	r, e := os.Open(path)
+	if e != nil {
+		return nil, e
+	}
+	defer func() {
+		e := r.Close()
+		if err == nil {
+			err = e
+		}
+	}()
+	cr := csv.NewReader(r)
+	cr.Comma = '\t'
+	for l, e := cr.Read(); e != io.EOF; l, e = cr.Read() {
+		if len(l) < 2 {
+			return nil, fmt.Errorf("ParseReadSets: len(l) %v < 2; l %v", len(l), l)
+		}
+		pairs = append(pairs, ReadSet{
+			Name: l[0],
+			BamPath: l[1],
+		})
+	}
+	return pairs, nil
+}
+
+func FullFQFMimic(f Flags) (err error) {
+	var sets []ReadSet
 	if e := BwaIndex(f.RefPath); e != nil {
 		return e
 	}
@@ -322,9 +415,18 @@ func FullFQFMimic(f Flags) error {
 	if e := CreateDict(f.RefPath); e != nil {
 		return e
 	}
-	sets, e := ParseReadSets(f.SeqPairsPath)
-	if e != nil {
-		return e
+	if !f.NoAln {
+		var e error
+		sets, e = ParseReadSets(f.SeqPairsPath)
+		if e != nil {
+			return e
+		}
+	} else {
+		var e error
+		sets, e = ParseBamSets(f.BamPathsPath)
+		if e != nil {
+			return e
+		}
 	}
 
 	var group errgroup.Group
@@ -332,7 +434,12 @@ func FullFQFMimic(f Flags) error {
 	var gvcfpaths []string
 	for _, set := range sets {
 		set := set
+
 		bampath := f.Outpre + "_" + set.Name + ".bam"
+		if f.NoAln {
+			bampath = set.BamPath
+		}
+
 		bampathrg := f.Outpre + "_" + set.Name + "_rg.bam"
 		gvcfpath := f.Outpre + "_" + set.Name + ".g.vcf.gz"
 		gvcfpaths = append(gvcfpaths, gvcfpath)
@@ -340,18 +447,35 @@ func FullFQFMimic(f Flags) error {
 		rev := set.ReversePath
 
 		group.Go(func() error {
-			if f.Trim {
-				fwd = f.Outpre + "_" + set.Name + "_forward_trimmed.fq.gz"
-				rev = f.Outpre + "_" + set.Name + "_reverse_trimmed.fq.gz"
-				if e := Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads); e != nil {
+			if !f.NoAln {
+				if f.Trim {
+					fwd = f.Outpre + "_" + set.Name + "_forward_trimmed.fq.gz"
+					rev = f.Outpre + "_" + set.Name + "_reverse_trimmed.fq.gz"
+					if e := Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads); e != nil {
+						return e
+					}
+					if f.DeleteTempFiles {
+						defer func() {
+							errors.Join(err, DeleteTrim(f, set))
+						}()
+					}
+				}
+				if e := BwaMem(f.RefPath, fwd, rev, bampath, f.Threads); e != nil {
 					return e
 				}
-			}
-			if e := BwaMem(f.RefPath, fwd, rev, bampath, f.Threads); e != nil {
-				return e
+				if f.DeleteTempFiles {
+					defer func() {
+						errors.Join(err, DeleteBam(f, set))
+					}()
+				}
 			}
 			if e := AddRG(bampath, bampathrg, set.Name); e != nil {
 				return e
+			}
+			if f.DeleteTempFiles {
+				defer func() {
+					errors.Join(err, DeleteRGBam(f, set))
+				}()
 			}
 			if e := SamIndex(bampathrg); e != nil {
 				return e
@@ -361,12 +485,22 @@ func FullFQFMimic(f Flags) error {
 			}
 			return nil
 		})
+		if f.DeleteTempFiles {
+			defer func() {
+				errors.Join(err, DeleteGvcfs(f, set))
+			}()
+		}
 	}
 	if e := group.Wait(); e != nil {
 		return e
 	}
 
 	goutpath := f.Outpre + ".g.vcf.gz"
+	if f.DeleteTempFiles {
+		defer func() {
+			errors.Join(err, DeletePath(goutpath))
+		}()
+	}
 	outpath := f.Outpre + ".vcf.gz"
 	return CombineGvcf(f.RefPath, goutpath, outpath, f.MemoryGb, gvcfpaths...)
 	
@@ -381,9 +515,23 @@ func main() {
 	flag.IntVar(&f.MemoryGb, "m", 8, "Memory to use (integer, gigabytes)")
 	flag.IntVar(&f.Nproc, "n", 1, "Number of simultaneous runs of BWA / picard to run")
 	flag.BoolVar(&f.Trim, "T", false, "Also trim input files with trimmomatic")
+	flag.BoolVar(&f.NoAln, "noaln", false, "Skip aligning (it is already done). Not compatible with -s.")
+	flag.BoolVar(&f.DeleteTempFiles, "d", false, "Delete all intermediate files except for index files and the final .vcf.gz file.")
+	flag.StringVar(&f.BamPathsPath, "bams", "", "Path to file containing paths to bams, one line per sample. Format: name (tab) path.bam. Not compatible with -s and requires -noaln.")
 	flag.Parse()
-	if (f.RefPath == "" || f.SeqPairsPath == "") {
-		log.Fatal("missing -r or -s")
+
+	if f.RefPath == "" {
+		log.Fatal("missing -r")
+	}
+
+	if !f.NoAln {
+		if (f.SeqPairsPath == "") {
+			log.Fatal("missing -s")
+		}
+	} else {
+		if (f.BamPathsPath == "") {
+			log.Fatal("missing -bams")
+		}
 	}
 
 	if e := FullFQFMimic(f); e != nil {

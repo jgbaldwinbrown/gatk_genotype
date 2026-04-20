@@ -10,6 +10,7 @@ import (
 	"flag"
 	"log"
 	"encoding/csv"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -25,6 +26,7 @@ type Flags struct {
 	Trim bool
 	BamPathsPath string
 	DeleteTempFiles bool
+	PicardCmd string
 }
 
 const adaptersFa = `>PrefixNX/1
@@ -268,8 +270,10 @@ func SamIndex(bampath string) error {
 	return cmd.Run()
 }
 
-func CreateDict(fapath string) error {
-	cmd := exec.Command("picard-tools", "CreateSequenceDictionary", "-R", fapath)
+func CreateDict(picardcmd, fapath string) error {
+	args := strings.Fields(picardcmd)
+	args = append(args, "CreateSequenceDictionary", "-R", fapath)
+	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -412,7 +416,7 @@ func FullFQFMimic(f Flags) (err error) {
 	if e := Faidx(f.RefPath); e != nil {
 		return e
 	}
-	if e := CreateDict(f.RefPath); e != nil {
+	if e := CreateDict(f.PicardCmd, f.RefPath); e != nil {
 		return e
 	}
 	if !f.NoAln {
@@ -518,6 +522,7 @@ func main() {
 	flag.BoolVar(&f.NoAln, "noaln", false, "Skip aligning (it is already done). Not compatible with -s.")
 	flag.BoolVar(&f.DeleteTempFiles, "d", false, "Delete all intermediate files except for index files and the final .vcf.gz file.")
 	flag.StringVar(&f.BamPathsPath, "bams", "", "Path to file containing paths to bams, one line per sample. Format: name (tab) path.bam. Not compatible with -s and requires -noaln.")
+	flag.StringVar(&f.PicardCmd, "picard", "picard-tools", "Command to invoke picard tools.")
 	flag.Parse()
 
 	if f.RefPath == "" {

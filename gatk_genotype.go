@@ -22,6 +22,7 @@ type Flags struct {
 	Outpre string
 	Threads int
 	MemoryGb int
+	SerialMemoryGb int
 	Nproc int
 	Trim bool
 	BamPathsPath string
@@ -506,7 +507,7 @@ func FullFQFMimic(f Flags) (err error) {
 		}()
 	}
 	outpath := f.Outpre + ".vcf.gz"
-	return CombineGvcf(f.RefPath, goutpath, outpath, f.MemoryGb, gvcfpaths...)
+	return CombineGvcf(f.RefPath, goutpath, outpath, f.SerialMemoryGb, gvcfpaths...)
 	
 }
 
@@ -516,7 +517,8 @@ func main() {
 	flag.StringVar(&f.SeqPairsPath, "s", "", "Path to tab-separated table containing pairs of forward and reverse read paths, one line per sample (required). Format: name (tab) forward.fq.gz (tab) reverse.fq.gz")
 	flag.StringVar(&f.Outpre, "o", "out", "Output prefix")
 	flag.IntVar(&f.Threads, "t", 1, "Threads to use")
-	flag.IntVar(&f.MemoryGb, "m", 8, "Memory to use (integer, gigabytes)")
+	flag.IntVar(&f.MemoryGb, "m", 8, "Memory to use for parallel processes (integer, gigabytes).")
+	flag.IntVar(&f.SerialMemoryGb, "M", 8, "Memory to use for serial processes (integer, gigabytes).")
 	flag.IntVar(&f.Nproc, "n", 1, "Number of simultaneous runs of BWA / picard to run")
 	flag.BoolVar(&f.Trim, "T", false, "Also trim input files with trimmomatic")
 	flag.BoolVar(&f.NoAln, "noaln", false, "Skip aligning (it is already done). Not compatible with -s.")

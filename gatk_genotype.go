@@ -11,9 +11,16 @@ import (
 	"log"
 	"encoding/csv"
 	"strings"
+	"regexp"
 
 	"golang.org/x/sync/errgroup"
 )
+
+var extRe = regexp.MustCompile(`\.[^/]*$`)
+
+func StripExtension(path string) string {
+	return extRe.ReplaceAllString(path, "")
+}
 
 type Flags struct {
 	NoAln bool
@@ -28,6 +35,7 @@ type Flags struct {
 	BamPathsPath string
 	DeleteTempFiles bool
 	PicardCmd string
+	Gogogo bool
 }
 
 const adaptersFa = `>PrefixNX/1
@@ -128,13 +136,23 @@ func TrimCore(forward, reverse, forwardTrimmed, forwardTrimmedUnpaired, reverseT
 	return cmd.Run()
 }
 
-func Trim(forward, reverse, outpre string, threads int) error {
-	return TrimCore(
+func Trim(forward, reverse, outpre string, threads int, gogogo bool) error {
+	fwd := outpre + "_forward_trimmed.fq.gz"
+	if !gogogo && IsDone(fwd) {
+		return nil
+	}
+
+	err := TrimCore(
 		forward, reverse,
 		outpre + "_forward_trimmed.fq.gz", outpre + "_forward_trimmed_unpaired.fq.gz",
 		outpre + "_reverse_trimmed.fq.gz", outpre + "_reverse_trimmed_unpaired.fq.gz",
 		threads,
 	)
+	if err != nil {
+		return err
+	}
+
+	return CreateDone(fwd)
 }
 
 func FileExists(path string) bool {
@@ -157,17 +175,37 @@ func DeleteTrim(f Flags, s ReadSet) error {
 			}
 		}
 	}
+
+	donepath := outpre + "_forward_trimmed.fq.gz" + ".done"
+	if FileExists(donepath) {
+		if e := os.Remove(donepath); e != nil {
+			return e
+		}
+	}
 	return nil
 }
 
-func BwaIndex(ref string) error {
+func BwaIndex(ref string, gogogo bool) error {
+	if !gogogo && IsDone(ref + ".bwt") {
+		return nil
+	}
+
 	cmd := exec.Command("bwa", "index", ref)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	return CreateDone(ref + ".bwt")
 }
 
-func BwaMem(ref, forward, reverse, out string, threads int) (err error) {
+func BwaMem(ref, forward, reverse, out string, threads int, gogogo bool) (err error) {
+	if !gogogo && IsDone(out) {
+		return nil
+	}
+
 	w, err := os.Create(out)
 	if err != nil {
 		return err
@@ -226,7 +264,7 @@ func BwaMem(ref, forward, reverse, out string, threads int) (err error) {
 		return e
 	}
 
-	return nil
+	return CreateDone(out)
 }
 
 func DeleteBam(f Flags, s ReadSet) error {
@@ -236,15 +274,30 @@ func DeleteBam(f Flags, s ReadSet) error {
 			return e
 		}
 	}
+	donepath := bampath + ".done"
+	if FileExists(donepath) {
+		if e := os.Remove(donepath); e != nil {
+			return e
+		}
+	}
 	return nil
 }
 
-func AddRG(inpath, outpath, name string) error {
+func AddRG(inpath, outpath, name string, gogogo bool) error {
+	if !gogogo && IsDone(outpath) {
+		return nil
+	}
+
 	rgchange := fmt.Sprintf("@RG\tID:%v\tSM:%v", name, name)
 	cmd := exec.Command("samtools", "addreplacerg", "-r", rgchange, inpath, "-o", outpath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	return CreateDone(outpath)
 }
 
 func DeleteRGBam(f Flags, s ReadSet) error {
@@ -254,33 +307,68 @@ func DeleteRGBam(f Flags, s ReadSet) error {
 			return e
 		}
 	}
+	donepath := bampathrg + ".done"
+	if FileExists(donepath) {
+		if e := os.Remove(donepath); e != nil {
+			return e
+		}
+	}
 	return nil
 }
 
-func Faidx(fapath string) error {
+func Faidx(fapath string, gogogo bool) error {
+	if !gogogo && IsDone(fapath + ".fai") {
+		return nil
+	}
+
 	cmd := exec.Command("samtools", "faidx", fapath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	return CreateDone(fapath + ".fai")
 }
 
-func SamIndex(bampath string) error {
+func SamIndex(bampath string, gogogo bool) error {
+	if !gogogo && IsDone(bampath + ".bai") {
+		return nil
+	}
+
 	cmd := exec.Command("samtools", "index", bampath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if e := cmd.Run(); e != nil {
+		return e
+	}
+
+	return CreateDone(bampath + ".bai")
 }
 
-func CreateDict(picardcmd, fapath string) error {
+func CreateDict(picardcmd, fapath string, gogogo bool) error {
+	dictpath := StripExtension(fapath) + ".dict"
+	if !gogogo && IsDone(dictpath) {
+		return nil
+	}
+
 	args := strings.Fields(picardcmd)
 	args = append(args, "CreateSequenceDictionary", "-R", fapath)
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if e := cmd.Run(); e != nil {
+		return e
+	}
+
+	return CreateDone(dictpath)
 }
 
-func HaplotypeCall(fapath, bampath, gvcfpath, name string, memoryGb int) error {
+func HaplotypeCall(fapath, bampath, gvcfpath, name string, memoryGb int, gogogo bool) error {
+	if !gogogo && IsDone(gvcfpath) {
+		return nil
+	}
+
 	memstr := fmt.Sprintf("-Xmx%vg", memoryGb)
 	cmd := exec.Command(
 		"gatk",
@@ -297,13 +385,20 @@ func HaplotypeCall(fapath, bampath, gvcfpath, name string, memoryGb int) error {
 	if e := cmd.Run(); e != nil {
 		return fmt.Errorf("HaplotypeCall: %w", e)
 	}
-	return nil
+
+	return CreateDone(gvcfpath)
 }
 
 func DeleteGvcfs(f Flags, s ReadSet) error {
 	gvcfpath := f.Outpre + "_" + s.Name + ".g.vcf.gz"
 	if FileExists(gvcfpath) {
 		if e := os.Remove(gvcfpath); e != nil {
+			return e
+		}
+	}
+	donepath := gvcfpath + ".done"
+	if FileExists(donepath) {
+		if e := os.Remove(donepath); e != nil {
 			return e
 		}
 	}
@@ -319,34 +414,55 @@ func DeletePath(path string) error {
 	return nil
 }
 
-func CombineGvcf(fapath, gvcfoutpath, vcfoutpath string, memoryGb int, gvcfpaths ...string) error {
+func IsDone(path string) bool {
+	return FileExists(path + ".done")
+}
+
+func CreateDone(path string) error {
+	_, e := os.Create(path + ".done")
+	return e
+}
+
+func CombineGvcf(fapath, gvcfoutpath, vcfoutpath string, memoryGb int, gogogo bool, gvcfpaths ...string) error {
 	memstr := fmt.Sprintf("-Xmx%vg", memoryGb)
-	combsl := []string{
-		"gatk",
-		"--java-options", memstr,
-		"CombineGVCFs",
-		"-R", fapath,
-		"-O", gvcfoutpath,
+
+	if gogogo || !IsDone(gvcfoutpath) {
+		combsl := []string{
+			"gatk",
+			"--java-options", memstr,
+			"CombineGVCFs",
+			"-R", fapath,
+			"-O", gvcfoutpath,
+		}
+		for _, gvcfpath := range gvcfpaths {
+			combsl = append(combsl, "--variant", gvcfpath)
+		}
+		comb := exec.Command(combsl[0], combsl[1:]...)
+		comb.Stdout = os.Stdout
+		comb.Stderr = os.Stderr
+		if e := comb.Run(); e != nil {
+			return e
+		}
+		if e := CreateDone(gvcfoutpath); e != nil {
+			return e
+		}
 	}
-	for _, gvcfpath := range gvcfpaths {
-		combsl = append(combsl, "--variant", gvcfpath)
-	}
-	comb := exec.Command(combsl[0], combsl[1:]...)
-	comb.Stdout = os.Stdout
-	comb.Stderr = os.Stderr
-	if e := comb.Run(); e != nil {
-		return e
-	}
-	geno := exec.Command(
-		"gatk",
-		"--java-options", memstr,
-		"GenotypeGVCFs",
-		"-R", fapath,
-		"-V", gvcfoutpath,
-		"-O", vcfoutpath,
-	)
-	if e := geno.Run(); e != nil {
-		return fmt.Errorf("GenotypeGVCFs: %w", e)
+
+	if gogogo || !IsDone(vcfoutpath) {
+		geno := exec.Command(
+			"gatk",
+			"--java-options", memstr,
+			"GenotypeGVCFs",
+			"-R", fapath,
+			"-V", gvcfoutpath,
+			"-O", vcfoutpath,
+		)
+		if e := geno.Run(); e != nil {
+			return fmt.Errorf("GenotypeGVCFs: %w", e)
+		}
+		if e := CreateDone(vcfoutpath); e != nil {
+			return e
+		}
 	}
 	return nil
 }
@@ -411,13 +527,13 @@ func ParseBamSets(path string) (pairs []ReadSet, err error) {
 
 func FullFQFMimic(f Flags) (err error) {
 	var sets []ReadSet
-	if e := BwaIndex(f.RefPath); e != nil {
+	if e := BwaIndex(f.RefPath, f.Gogogo); e != nil {
 		return e
 	}
-	if e := Faidx(f.RefPath); e != nil {
+	if e := Faidx(f.RefPath, f.Gogogo); e != nil {
 		return e
 	}
-	if e := CreateDict(f.PicardCmd, f.RefPath); e != nil {
+	if e := CreateDict(f.PicardCmd, f.RefPath, f.Gogogo); e != nil {
 		return e
 	}
 	if !f.NoAln {
@@ -456,7 +572,7 @@ func FullFQFMimic(f Flags) (err error) {
 				if f.Trim {
 					fwd = f.Outpre + "_" + set.Name + "_forward_trimmed.fq.gz"
 					rev = f.Outpre + "_" + set.Name + "_reverse_trimmed.fq.gz"
-					if e := Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads); e != nil {
+					if e := Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads, f.Gogogo); e != nil {
 						return e
 					}
 					if f.DeleteTempFiles {
@@ -465,7 +581,7 @@ func FullFQFMimic(f Flags) (err error) {
 						}()
 					}
 				}
-				if e := BwaMem(f.RefPath, fwd, rev, bampath, f.Threads); e != nil {
+				if e := BwaMem(f.RefPath, fwd, rev, bampath, f.Threads, f.Gogogo); e != nil {
 					return e
 				}
 				if f.DeleteTempFiles {
@@ -474,7 +590,7 @@ func FullFQFMimic(f Flags) (err error) {
 					}()
 				}
 			}
-			if e := AddRG(bampath, bampathrg, set.Name); e != nil {
+			if e := AddRG(bampath, bampathrg, set.Name, f.Gogogo); e != nil {
 				return e
 			}
 			if f.DeleteTempFiles {
@@ -482,10 +598,10 @@ func FullFQFMimic(f Flags) (err error) {
 					errors.Join(err, DeleteRGBam(f, set))
 				}()
 			}
-			if e := SamIndex(bampathrg); e != nil {
+			if e := SamIndex(bampathrg, f.Gogogo); e != nil {
 				return e
 			}
-			if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb); e != nil {
+			if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo); e != nil {
 				return e
 			}
 			return nil
@@ -507,7 +623,7 @@ func FullFQFMimic(f Flags) (err error) {
 		}()
 	}
 	outpath := f.Outpre + ".vcf.gz"
-	return CombineGvcf(f.RefPath, goutpath, outpath, f.SerialMemoryGb, gvcfpaths...)
+	return CombineGvcf(f.RefPath, goutpath, outpath, f.SerialMemoryGb, f.Gogogo, gvcfpaths...)
 	
 }
 
@@ -525,6 +641,7 @@ func main() {
 	flag.BoolVar(&f.DeleteTempFiles, "d", false, "Delete all intermediate files except for index files and the final .vcf.gz file.")
 	flag.StringVar(&f.BamPathsPath, "bams", "", "Path to file containing paths to bams, one line per sample. Format: name (tab) path.bam. Not compatible with -s and requires -noaln.")
 	flag.StringVar(&f.PicardCmd, "picard", "picard-tools", "Command to invoke picard tools.")
+	flag.BoolVar(&f.Gogogo, "g", false, "Go go go: rebuild everything from scratch, ignoring \".done\" files.")
 	flag.Parse()
 
 	if f.RefPath == "" {

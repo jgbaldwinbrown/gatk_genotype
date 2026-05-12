@@ -460,12 +460,19 @@ func CatGvcf(w io.Writer, path string, writeHeader bool) (err error) {
 	return s.Err()
 }
 
-func JoinGvcfs(gvcfpre string, gogogo bool, chrs ...Span) (err error) {
+func Tabix(vcfpath string) error {
+	cmd := exec.Command("tabix", "-p", "vcf", vcfpath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func JoinGvcfs(gvcfpre string, gogogo bool, threads int, chrs ...Span) (err error) {
 	outpath := gvcfpre + ".g.vcf.gz"
 	if !gogogo && IsDone(outpath) {
 		return nil
 	}
-	out, e := zfile.CreateBgz(outpath, 1)
+	out, e := zfile.CreateBgz(outpath, threads)
 	if e != nil {
 		return e
 	}
@@ -517,7 +524,10 @@ func HaplotypeCallSplit(fapath, bampath, gvcfpre, name, chrspath string, memoryG
 	if e := g.Wait(); e != nil {
 		return e
 	}
-	if e := JoinGvcfs(gvcfpre, gogogo, chrs...); e != nil {
+	if e := JoinGvcfs(gvcfpre, gogogo, threads, chrs...); e != nil {
+		return e
+	}
+	if e := Tabix(gvcfpre + ".g.vcf.gz"); e != nil {
 		return e
 	}
 	return CreateDone(gvcfpre + ".g.vcf.gz")

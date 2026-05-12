@@ -14,7 +14,15 @@ import (
 	"regexp"
 
 	"golang.org/x/sync/errgroup"
+	"github.com/jgbaldwinbrown/zfile"
 )
+
+type Span struct {
+	Chr string
+	Start int64
+	End int64
+	FullChr bool
+}
 
 var extRe = regexp.MustCompile(`\.[^/]*$`)
 
@@ -36,6 +44,7 @@ type Flags struct {
 	DeleteTempFiles bool
 	PicardCmd string
 	Gogogo bool
+	ChrsPath string
 }
 
 const adaptersFa = `>PrefixNX/1
@@ -389,6 +398,131 @@ func HaplotypeCall(fapath, bampath, gvcfpath, name string, memoryGb int, gogogo 
 	return CreateDone(gvcfpath)
 }
 
+func HaplotypeCallSpans(fapath, bampath, gvcfpath, name string, memoryGb int, gogogo bool, spans ...Span) error {
+	if !gogogo && IsDone(gvcfpath) {
+		return nil
+	}
+
+	memstr := fmt.Sprintf("-Xmx%vg", memoryGb)
+	args := []string{
+		"gatk",
+		"--java-options", memstr,
+		"HaplotypeCaller", 
+		"-R", fapath,
+		"-I", bampath,
+		"-O", gvcfpath,
+		"--sample-name", name,
+		"-ERC", "GVCF",
+	}
+	for _, span := range spans {
+		if span.FullChr {
+			args = append(args, "-L", span.Chr)
+		} else {
+			args = append(args, "-L", fmt.Sprintf("%v:%v-%v", span.Chr, span.Start, span.End))
+		}
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if e := cmd.Run(); e != nil {
+		return fmt.Errorf("HaplotypeCall: %w", e)
+	}
+
+	return CreateDone(gvcfpath)
+}
+
+var commentRe = regexp.MustCompile(`^#`)
+
+func CatGvcf(w io.Writer, path string, writeHeader bool) (err error) {
+	r, e := zfile.Open(path)
+	if e != nil {
+		return e
+	}
+	defer func() {
+		err = errors.Join(err, r.Close())
+	}()
+
+	if writeHeader {
+		_, e := io.Copy(w, r)
+		return e
+	}
+
+	s := bufio.NewScanner(r)
+	s.Buffer([]byte{}, 1e15)
+	for s.Scan() {
+		if commentRe.MatchString(s.Text()) {
+			continue
+		}
+		if _, e := fmt.Fprintln(w, s.Text()); e != nil {
+			return e
+		}
+	}
+	return s.Err()
+}
+
+func JoinGvcfs(gvcfpre string, gogogo bool, chrs ...Span) (err error) {
+	outpath := gvcfpre + ".g.vcf.gz"
+	if !gogogo && IsDone(outpath) {
+		return nil
+	}
+	out, e := zfile.CreateBgz(outpath, 1)
+	if e != nil {
+		return e
+	}
+	defer func() {
+		err = errors.Join(err, out.Close())
+	}()
+
+	writeHeader := true
+	for _, chr := range chrs {
+		gvcfpath := gvcfpre + "_chr_" + chr.Chr + ".g.vcf.gz"
+		if e := CatGvcf(out, gvcfpath, writeHeader); e != nil {
+			return e
+		}
+		writeHeader = false
+	}
+	return nil
+}
+
+func ParseChrs(path string) (spans []Span, err error) {
+	r, e := os.Open(path)
+	if e != nil {
+		return nil, e
+	}
+	defer func() {
+		err = errors.Join(r.Close())
+	}()
+
+	s := bufio.NewScanner(r)
+	for s.Scan() {
+		spans = append(spans, Span{Chr: s.Text(), FullChr: true})
+	}
+	return spans, s.Err()
+}
+
+func HaplotypeCallSplit(fapath, bampath, gvcfpre, name, chrspath string, memoryGb int, gogogo bool, threads int) error {
+	chrs, e := ParseChrs(chrspath)
+	if e != nil {
+		return e
+	}
+	var g errgroup.Group
+	if threads > 0 {
+		g.SetLimit(threads)
+	}
+	for _, chr := range chrs {
+		g.Go(func() error {
+			return HaplotypeCallSpans(fapath, bampath, gvcfpre + "_chr_" + chr.Chr + ".g.vcf.gz", name, memoryGb, gogogo, chr)
+		})
+	}
+	if e := g.Wait(); e != nil {
+		return e
+	}
+	if e := JoinGvcfs(gvcfpre, gogogo, chrs...); e != nil {
+		return e
+	}
+	return CreateDone(gvcfpre + ".g.vcf.gz")
+}
+
 func DeleteGvcfs(f Flags, s ReadSet) error {
 	gvcfpath := f.Outpre + "_" + s.Name + ".g.vcf.gz"
 	if FileExists(gvcfpath) {
@@ -563,6 +697,7 @@ func FullFQFMimic(f Flags) (err error) {
 
 		bampathrg := f.Outpre + "_" + set.Name + "_rg.bam"
 		gvcfpath := f.Outpre + "_" + set.Name + ".g.vcf.gz"
+		gvcfpre := f.Outpre + "_" + set.Name
 		gvcfpaths = append(gvcfpaths, gvcfpath)
 		fwd := set.ForwardPath
 		rev := set.ReversePath
@@ -601,8 +736,14 @@ func FullFQFMimic(f Flags) (err error) {
 			if e := SamIndex(bampathrg, f.Gogogo); e != nil {
 				return e
 			}
-			if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo); e != nil {
-				return e
+			if f.ChrsPath != "" {
+				if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, 1); e != nil {
+					return e
+				}
+			} else {
+				if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo); e != nil {
+					return e
+				}
 			}
 			return nil
 		})
@@ -641,6 +782,7 @@ func main() {
 	flag.BoolVar(&f.DeleteTempFiles, "d", false, "Delete all intermediate files except for index files and the final .vcf.gz file.")
 	flag.StringVar(&f.BamPathsPath, "bams", "", "Path to file containing paths to bams, one line per sample. Format: name (tab) path.bam. Not compatible with -s and requires -noaln.")
 	flag.StringVar(&f.PicardCmd, "picard", "picard-tools", "Command to invoke picard tools.")
+	flag.StringVar(&f.ChrsPath, "chrs", "", "Path to a newline-separated list of chrs to call haplotypes in; using this allows haplotypes to be called in pieces for cleaner restarts, one piece per chromosome.")
 	flag.BoolVar(&f.Gogogo, "g", false, "Go go go: rebuild everything from scratch, ignoring \".done\" files.")
 	flag.Parse()
 

@@ -30,6 +30,7 @@ func StripExtension(path string) string {
 
 type Flags struct {
 	NoAln bool
+	NoCombine bool
 	RefPath string
 	SeqPairsPath string
 	Outpre string
@@ -765,13 +766,16 @@ func FullFQFMimic(f Flags) (err error) {
 		return e
 	}
 
-	goutpath := f.Outpre + ".g.vcf.gz"
-	if f.DeleteTempFiles {
-		defer func() {
-			errors.Join(err, DeletePath(goutpath))
-		}()
+	if !f.NoCombine {
+		goutpath := f.Outpre + ".g.vcf.gz"
+		if f.DeleteTempFiles {
+			defer func() {
+				errors.Join(err, DeletePath(goutpath))
+			}()
+		}
+		outpath := f.Outpre + ".vcf.gz"
+		return CombineGvcf(f.RefPath, goutpath, outpath, f.SerialMemoryGb, f.Gogogo, gvcfpaths...)
 	}
-	outpath := f.Outpre + ".vcf.gz"
-	return CombineGvcf(f.RefPath, goutpath, outpath, f.SerialMemoryGb, f.Gogogo, gvcfpaths...)
-	
+
+	return nil
 }

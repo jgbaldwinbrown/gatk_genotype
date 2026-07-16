@@ -746,7 +746,7 @@ func FullFQFMimic(f Flags) (err error) {
 				return e
 			}
 			if f.ChrsPath != "" {
-				if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, 1); e != nil {
+				if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, f.Threads); e != nil {
 					return e
 				}
 			} else {

@@ -506,27 +506,32 @@ func ParseChrs(path string) (spans []Span, err error) {
 	return spans, s.Err()
 }
 
-func HaplotypeCallSplit(fapath, bampath, gvcfpre, name, chrspath string, memoryGb int, gogogo bool, threads int) error {
+func HaplotypeCallSplit(fapath, bampath, gvcfpre, name, chrspath string, memoryGb int, gogogo bool, threads int, rq *RunQueue) error {
 	chrs, e := ParseChrs(chrspath)
 	if e != nil {
 		return e
 	}
 	var g errgroup.Group
-	if threads > 0 {
-		g.SetLimit(threads)
-	}
 	for _, chr := range chrs {
 		g.Go(func() error {
-			return HaplotypeCallSpans(fapath, bampath, gvcfpre + "_chr_" + chr.Chr + ".g.vcf.gz", name, memoryGb, gogogo, chr)
+			return rq.RunErr(func() error {
+				return HaplotypeCallSpans(fapath, bampath, gvcfpre + "_chr_" + chr.Chr + ".g.vcf.gz", name, memoryGb, gogogo, chr)
+			})
 		})
 	}
 	if e := g.Wait(); e != nil {
 		return e
 	}
-	if e := JoinGvcfs(gvcfpre, gogogo, threads, chrs...); e != nil {
-		return e
-	}
-	if e := Tabix(gvcfpre + ".g.vcf.gz"); e != nil {
+	e = rq.RunErr(func() error {
+		if e := JoinGvcfs(gvcfpre, gogogo, threads, chrs...); e != nil {
+			return e
+		}
+		if e := Tabix(gvcfpre + ".g.vcf.gz"); e != nil {
+			return e
+		}
+		return nil
+	})
+	if e != nil {
 		return e
 	}
 	return CreateDone(gvcfpre + ".g.vcf.gz")
@@ -693,8 +698,9 @@ func FullFQFMimic(f Flags) (err error) {
 		}
 	}
 
+	rq := NewRunQueue(f.Nproc)
+
 	var group errgroup.Group
-	group.SetLimit(f.Nproc)
 	var gvcfpaths []string
 	for _, set := range sets {
 		set := set
@@ -716,7 +722,11 @@ func FullFQFMimic(f Flags) (err error) {
 				if f.Trim {
 					fwd = f.Outpre + "_" + set.Name + "_forward_trimmed.fq.gz"
 					rev = f.Outpre + "_" + set.Name + "_reverse_trimmed.fq.gz"
-					if e := Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads, f.Gogogo); e != nil {
+
+					e := rq.RunErr(func() error {
+						return Trim(set.ForwardPath, set.ReversePath, f.Outpre + "_" + set.Name, f.Threads, f.Gogogo)
+					})
+					if e != nil {
 						return e
 					}
 					if f.DeleteTempFiles {
@@ -724,8 +734,14 @@ func FullFQFMimic(f Flags) (err error) {
 							errors.Join(err, DeleteTrim(f, set))
 						}()
 					}
+					if e != nil {
+						return e
+					}
 				}
-				if e := BwaMem(f.RefPath, fwd, rev, bampath, f.Threads, f.Gogogo); e != nil {
+				e := rq.RunErr(func() error {
+					return BwaMem(f.RefPath, fwd, rev, bampath, f.Threads, f.Gogogo)
+				})
+				if e != nil {
 					return e
 				}
 				if f.DeleteTempFiles {
@@ -734,7 +750,10 @@ func FullFQFMimic(f Flags) (err error) {
 					}()
 				}
 			}
-			if e := AddRG(bampath, bampathrg, set.Name, f.Gogogo); e != nil {
+			e := rq.RunErr(func() error {
+				return AddRG(bampath, bampathrg, set.Name, f.Gogogo)
+			})
+			if e != nil {
 				return e
 			}
 			if f.DeleteTempFiles {
@@ -742,15 +761,21 @@ func FullFQFMimic(f Flags) (err error) {
 					errors.Join(err, DeleteRGBam(f, set))
 				}()
 			}
-			if e := SamIndex(bampathrg, f.Gogogo); e != nil {
+			e = rq.RunErr(func() error {
+				return SamIndex(bampathrg, f.Gogogo)
+			})
+			if e != nil {
 				return e
 			}
 			if f.ChrsPath != "" {
-				if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, f.Threads); e != nil {
+				if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, f.Threads, rq); e != nil {
 					return e
 				}
 			} else {
-				if e := HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo); e != nil {
+				e := rq.RunErr(func() error {
+					return HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo)
+				})
+				if e != nil {
 					return e
 				}
 			}

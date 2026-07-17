@@ -19,6 +19,7 @@ func main() {
 	flag.BoolVar(&f.Trim, "T", false, "Also trim input files with trimmomatic")
 	flag.BoolVar(&f.NoAln, "noaln", false, "Skip aligning (it is already done). Not compatible with -s.")
 	flag.BoolVar(&f.NoCombine, "nocombine", false, "Skip combining gvcf files (will do this later).")
+	flag.BoolVar(&f.NoHaploCall, "nohaplocall", false, "Skip adding read groups and creating individual gvcf files.")
 	flag.BoolVar(&f.DeleteTempFiles, "d", false, "Delete all intermediate files except for index files and the final .vcf.gz file.")
 	flag.StringVar(&f.BamPathsPath, "bams", "", "Path to file containing paths to bams, one line per sample. Format: name (tab) path.bam. Not compatible with -s and requires -noaln.")
 	flag.StringVar(&f.PicardCmd, "picard", "picard-tools", "Command to invoke picard tools.")

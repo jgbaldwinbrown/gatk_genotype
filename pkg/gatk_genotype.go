@@ -30,6 +30,7 @@ func StripExtension(path string) string {
 
 type Flags struct {
 	NoAln bool
+	NoHaploCall bool
 	NoCombine bool
 	RefPath string
 	SeqPairsPath string
@@ -750,33 +751,36 @@ func FullFQFMimic(f Flags) (err error) {
 					}()
 				}
 			}
-			e := rq.RunErr(func() error {
-				return AddRG(bampath, bampathrg, set.Name, f.Gogogo)
-			})
-			if e != nil {
-				return e
-			}
-			if f.DeleteTempFiles {
-				defer func() {
-					errors.Join(err, DeleteRGBam(f, set))
-				}()
-			}
-			e = rq.RunErr(func() error {
-				return SamIndex(bampathrg, f.Gogogo)
-			})
-			if e != nil {
-				return e
-			}
-			if f.ChrsPath != "" {
-				if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, f.Threads, rq); e != nil {
-					return e
-				}
-			} else {
+
+			if !f.NoHaploCall {
 				e := rq.RunErr(func() error {
-					return HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo)
+					return AddRG(bampath, bampathrg, set.Name, f.Gogogo)
 				})
 				if e != nil {
 					return e
+				}
+				if f.DeleteTempFiles {
+					defer func() {
+						errors.Join(err, DeleteRGBam(f, set))
+					}()
+				}
+				e = rq.RunErr(func() error {
+					return SamIndex(bampathrg, f.Gogogo)
+				})
+				if e != nil {
+					return e
+				}
+				if f.ChrsPath != "" {
+					if e := HaplotypeCallSplit(f.RefPath, bampathrg, gvcfpre, set.Name, f.ChrsPath, f.MemoryGb, f.Gogogo, f.Threads, rq); e != nil {
+						return e
+					}
+				} else {
+					e := rq.RunErr(func() error {
+						return HaplotypeCall(f.RefPath, bampathrg, gvcfpath, set.Name, f.MemoryGb, f.Gogogo)
+					})
+					if e != nil {
+						return e
+					}
 				}
 			}
 			return nil

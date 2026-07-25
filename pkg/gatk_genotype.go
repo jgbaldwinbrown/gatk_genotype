@@ -461,6 +461,9 @@ func CatGvcf(w io.Writer, path string, writeHeader bool) (err error) {
 }
 
 func Tabix(vcfpath string) error {
+	if IsDone(vcfpath) {
+		return nil
+	}
 	cmd := exec.Command("tabix", "-p", "vcf", vcfpath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
